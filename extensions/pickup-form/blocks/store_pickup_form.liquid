@@ -1,0 +1,359 @@
+{%- comment -%}
+  店舗取置き（in-store pickup reservation）フォーム — Theme App Extension app block。
+  PDP のセクションに配置する。決済は行わず、選択ロケーションの在庫を取置き予約する。
+
+  動作:
+    1. 表示中 variant の取置き可能ロケーションを App Proxy GET /apps/pickup/locations で取得
+    2. ロケーション選択 + 数量 を入力（顧客情報はログインアカウントを使用。手入力なし）
+    3. App Proxy POST /apps/pickup/reservations で予約作成（冪等キー付き）
+  ログイン顧客限定: customer が無い場合はフォームを出さずログイン誘導を表示する。
+  顧客 ID は App Proxy 署名済み logged_in_customer_id をサーバ側で採用する（クライアントは送らない）。
+  在庫不足(409)は「在庫が変動しました」と表示する。
+{%- endcomment -%}
+
+{%- assign pb = block.settings -%}
+{%- assign product_obj = pb.product -%}
+{%- if product_obj == blank and product != blank -%}
+  {%- assign product_obj = product -%}
+{%- endif -%}
+{%- comment -%}
+  variant 解決のフォールバック順:
+    1. selected_or_first_available_variant（URL で選択中 or 最初の販売可能 variant）
+    2. variants.first（バリアント未設定の単一商品 / オンライン在庫切れでも必ず取れる）
+  取置きは「オンライン販売可否に関係なく特定ロケーションの在庫を押さえる」用途なので、
+  販売可能 variant が無くても variant.id を必ず出力する。
+{%- endcomment -%}
+{%- assign init_variant = product_obj.selected_or_first_available_variant -%}
+{%- if init_variant == blank -%}
+  {%- assign init_variant = product_obj.variants.first -%}
+{%- endif -%}
+
+{%- if customer -%}
+<div
+  id="pickup-{{ block.id }}"
+  class="pickup-block"
+  data-pickup-block
+  data-variant-id="{{ init_variant.id }}"
+  data-locations-url="{{ pb.proxy_base }}/locations"
+  data-reservations-url="{{ pb.proxy_base }}/reservations"
+  {{ block.shopify_attributes }}
+>
+  <h3 class="pickup-block__heading">{{ pb.heading | escape }}</h3>
+  {%- if pb.subheading != blank -%}
+    <p class="pickup-block__sub">{{ pb.subheading | escape }}</p>
+  {%- endif -%}
+  {%- comment -%} 宛名: 氏名が空なら Email を使う（氏名なしでも顧客アカウントは作成できるため）。 {%- endcomment -%}
+  {%- assign greet_name = customer.name | strip -%}
+  {%- if greet_name == blank -%}{%- assign greet_name = customer.email -%}{%- endif -%}
+  {%- if greet_name != blank -%}
+    <p class="pickup-block__sub">{{ greet_name }} 様としてお申し込みします。</p>
+  {%- endif -%}
+
+  <div class="pickup-block__status" data-pickup-status hidden></div>
+
+  <form class="pickup-block__form" data-pickup-form>
+    <label class="pickup-block__field">
+      <span>{{ pb.label_location | escape }}</span>
+      <select name="locationId" data-pickup-locations required disabled>
+        <option value="">{{ pb.loading_text | escape }}</option>
+      </select>
+    </label>
+
+    <label class="pickup-block__field">
+      <span>{{ pb.label_quantity | escape }}</span>
+      <input type="number" name="quantity" value="1" min="1" max="999" step="1" required>
+    </label>
+
+    <button type="submit" class="pickup-block__submit" data-pickup-submit disabled>
+      {{ pb.button_label | escape }}
+    </button>
+    <p class="pickup-block__hint" data-pickup-hint></p>
+  </form>
+</div>
+
+<style>
+  #pickup-{{ block.id }} {
+    --pickup-accent: {{ pb.accent_color }};
+    border: 1px solid rgba(0,0,0,.12);
+    border-radius: 10px;
+    padding: 1.1rem 1.2rem;
+    margin: 1.2rem 0;
+    max-width: 30rem;
+  }
+  #pickup-{{ block.id }} .pickup-block__heading { margin: 0 0 .25rem; font-size: 1.1rem; }
+  #pickup-{{ block.id }} .pickup-block__sub { margin: 0 0 .9rem; opacity: .75; font-size: .9rem; }
+  #pickup-{{ block.id }} .pickup-block__field { display: block; margin-bottom: .7rem; }
+  #pickup-{{ block.id }} .pickup-block__field > span { display: block; font-size: .82rem; margin-bottom: .25rem; }
+  #pickup-{{ block.id }} .pickup-block__field input,
+  #pickup-{{ block.id }} .pickup-block__field select {
+    width: 100%; padding: .5rem .6rem; border: 1px solid rgba(0,0,0,.2);
+    border-radius: 6px; font-size: .95rem; box-sizing: border-box; background: #fff;
+  }
+  #pickup-{{ block.id }} .pickup-block__submit {
+    width: 100%; padding: .65rem 1rem; border: 0; border-radius: 6px; cursor: pointer;
+    background: var(--pickup-accent); color: #fff; font-size: .98rem; font-weight: 600;
+  }
+  #pickup-{{ block.id }} .pickup-block__submit[disabled] { opacity: .5; cursor: not-allowed; }
+  #pickup-{{ block.id }} .pickup-block__hint { font-size: .82rem; opacity: .7; margin: .5rem 0 0; min-height: 1em; }
+  #pickup-{{ block.id }} .pickup-block__status { padding: .6rem .75rem; border-radius: 6px; margin-bottom: .9rem; font-size: .9rem; }
+  #pickup-{{ block.id }} .pickup-block__status[data-tone="success"] { background: #e6f4ea; color: #1e6b35; }
+  #pickup-{{ block.id }} .pickup-block__status[data-tone="error"] { background: #fce8e6; color: #a51c11; }
+</style>
+
+<script>
+  (function () {
+    var root = document.getElementById("pickup-{{ block.id }}");
+    if (!root || root.dataset.pickupInit === "1") return;
+    root.dataset.pickupInit = "1";
+
+    var T = {
+      reservedOk: {{ pb.msg_success | json }},
+      soldOut: {{ pb.msg_sold_out | json }},
+      stockChanged: {{ pb.msg_stock_changed | json }},
+      genericError: {{ pb.msg_error | json }},
+      submitting: {{ pb.msg_submitting | json }},
+      pickupAt: {{ pb.label_pickup_at | json }},
+      holdHint: {{ pb.hold_hint | json }},
+      receiptNo: {{ pb.label_receipt | json }}
+    };
+
+    var locationsUrl = root.dataset.locationsUrl;
+    var reservationsUrl = root.dataset.reservationsUrl;
+    var sel = root.querySelector("[data-pickup-locations]");
+    var form = root.querySelector("[data-pickup-form]");
+    var submitBtn = root.querySelector("[data-pickup-submit]");
+    var statusEl = root.querySelector("[data-pickup-status]");
+    var hintEl = root.querySelector("[data-pickup-hint]");
+
+    var idemKey = newIdem();
+    var currentVariantId = String(root.dataset.variantId || "");
+    console.log("[pickup] init | variantId=", JSON.stringify(currentVariantId),
+                "| locationsUrl=", locationsUrl, "| reservationsUrl=", reservationsUrl);
+
+    function newIdem() {
+      try {
+        if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+      } catch (e) {}
+      return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
+        var r = (Math.random() * 16) | 0;
+        var v = c === "x" ? r : (r & 0x3) | 0x8;
+        return v.toString(16);
+      });
+    }
+
+    function showStatus(tone, msg) {
+      statusEl.hidden = false;
+      statusEl.setAttribute("data-tone", tone);
+      statusEl.textContent = msg;
+    }
+    function clearStatus() { statusEl.hidden = true; statusEl.textContent = ""; }
+
+    function fmtExpiry(iso) {
+      if (!iso) return "";
+      try {
+        return new Date(iso).toLocaleString();
+      } catch (e) { return iso; }
+    }
+
+    function loadLocations() {
+      if (!currentVariantId) {
+        console.warn("[pickup] loadLocations ABORT: currentVariantId is EMPTY (variant unresolved in Liquid).");
+        return;
+      }
+      sel.disabled = true;
+      submitBtn.disabled = true;
+      sel.innerHTML = "<option value=''>" + escapeHtml({{ pb.loading_text | json }}) + "</option>";
+
+      var url = locationsUrl + "?variantId=" + encodeURIComponent(currentVariantId);
+      console.log("[pickup] GET", url);
+      fetch(url, {
+        headers: { "Accept": "application/json" }
+      })
+        .then(function (r) {
+          console.log("[pickup] response status:", r.status, "ok:", r.ok,
+                      "content-type:", r.headers.get("content-type"));
+          return r.text().then(function (text) {
+            var body = null;
+            try { body = JSON.parse(text); }
+            catch (e) { console.error("[pickup] response is NOT JSON. raw body:", text); }
+            return { ok: r.ok, status: r.status, body: body };
+          });
+        })
+        .then(function (res) {
+          console.log("[pickup] parsed body:", res.body);
+          var locs = (res.body && res.body.locations) || [];
+          console.log("[pickup] locations count:", locs.length);
+          sel.innerHTML = "";
+          if (!res.ok || locs.length === 0) {
+            var o = document.createElement("option");
+            o.value = ""; o.textContent = T.soldOut;
+            sel.appendChild(o);
+            sel.disabled = true;
+            submitBtn.disabled = true;
+            hintEl.textContent = "";
+            return;
+          }
+          locs.forEach(function (l) {
+            var o = document.createElement("option");
+            o.value = l.locationId;
+            o.textContent = l.name + " (" + l.available + ")";
+            sel.appendChild(o);
+          });
+          sel.disabled = false;
+          submitBtn.disabled = false;
+          if (res.body.holdHours && T.holdHint) {
+            hintEl.textContent = T.holdHint.replace("{hours}", res.body.holdHours);
+          }
+        })
+        .catch(function (e) {
+          console.error("[pickup] fetch failed (network/abort):", e);
+          sel.innerHTML = "";
+          var o = document.createElement("option");
+          o.value = ""; o.textContent = T.genericError;
+          sel.appendChild(o);
+          sel.disabled = true; submitBtn.disabled = true;
+        });
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, function (c) {
+        return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+      });
+    }
+
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      clearStatus();
+      if (!currentVariantId || !sel.value) return;
+
+      // 顧客情報は送らない。サーバ側が App Proxy 署名済み logged_in_customer_id から特定する。
+      var payload = {
+        variantId: currentVariantId,
+        locationId: sel.value,
+        quantity: parseInt(form.quantity.value, 10) || 1,
+        idempotencyKey: idemKey
+      };
+
+      submitBtn.disabled = true;
+      var prevLabel = submitBtn.textContent;
+      submitBtn.textContent = T.submitting;
+
+      fetch(reservationsUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify(payload)
+      })
+        .then(function (r) { return r.json().then(function (b) { return { status: r.status, body: b }; }); })
+        .then(function (res) {
+          if (res.status === 201 || res.status === 200) {
+            var rv = res.body.reservation || {};
+            var parts = [T.reservedOk];
+            if (rv.locationName) parts.push(T.pickupAt + ": " + rv.locationName);
+            if (rv.expiresAt) parts.push("〜 " + fmtExpiry(rv.expiresAt));
+            if (rv.reservationNo) parts.push(T.receiptNo + ": " + rv.reservationNo);
+            showStatus("success", parts.join("  /  "));
+            idemKey = newIdem(); // 次の予約は新しいキーで
+            loadLocations();     // 在庫表示を更新
+          } else if (res.status === 409) {
+            showStatus("error", T.stockChanged);
+            loadLocations();
+          } else {
+            showStatus("error", T.genericError);
+          }
+        })
+        .catch(function () { showStatus("error", T.genericError); })
+        .finally(function () {
+          submitBtn.textContent = prevLabel;
+          submitBtn.disabled = sel.disabled || !sel.value;
+        });
+    });
+
+    // variant 切替の追従: 商品フォームの [name="id"] を監視。
+    var productForm = root.closest("form[action*='/cart/add']") ||
+      document.querySelector("form[action*='/cart/add']");
+    var idInput = productForm ? productForm.querySelector("[name='id']") : null;
+    if (idInput) {
+      idInput.addEventListener("change", function () {
+        if (idInput.value && idInput.value !== currentVariantId) {
+          currentVariantId = String(idInput.value);
+          root.dataset.variantId = currentVariantId;
+          idemKey = newIdem();
+          clearStatus();
+          loadLocations();
+        }
+      });
+    }
+    // テーマ依存の variant:change カスタムイベントにも対応。
+    document.addEventListener("variant:change", function (evt) {
+      var v = evt && evt.detail && (evt.detail.variant || evt.detail);
+      var id = v && (v.id || v.variantId);
+      if (id && String(id) !== currentVariantId) {
+        currentVariantId = String(id);
+        root.dataset.variantId = currentVariantId;
+        idemKey = newIdem();
+        clearStatus();
+        loadLocations();
+      }
+    });
+
+    loadLocations();
+  })();
+</script>
+{%- else -%}
+  <div id="pickup-{{ block.id }}" class="pickup-block pickup-block--login" {{ block.shopify_attributes }}>
+    <h3 class="pickup-block__heading">{{ pb.heading | escape }}</h3>
+    <p class="pickup-block__sub">{{ pb.login_prompt | escape }}</p>
+    <a class="pickup-block__submit pickup-block__login-link"
+       href="{{ routes.account_login_url }}?return_url={{ request.path | url_encode }}">
+      {{ pb.login_link_label | escape }}
+    </a>
+  </div>
+  <style>
+    #pickup-{{ block.id }}.pickup-block--login {
+      --pickup-accent: {{ pb.accent_color }};
+      border: 1px solid rgba(0,0,0,.12);
+      border-radius: 10px;
+      padding: 1.1rem 1.2rem;
+      margin: 1.2rem 0;
+      max-width: 30rem;
+    }
+    #pickup-{{ block.id }}.pickup-block--login .pickup-block__heading { margin: 0 0 .25rem; font-size: 1.1rem; }
+    #pickup-{{ block.id }}.pickup-block--login .pickup-block__sub { margin: 0 0 .9rem; opacity: .75; font-size: .9rem; }
+    #pickup-{{ block.id }}.pickup-block--login .pickup-block__login-link {
+      display: inline-block; width: auto; text-align: center; text-decoration: none;
+      padding: .65rem 1.2rem; border-radius: 6px;
+      background: var(--pickup-accent); color: #fff; font-size: .98rem; font-weight: 600;
+    }
+  </style>
+{%- endif -%}
+
+{% schema %}
+{
+  "name": "Store pickup",
+  "target": "section",
+  "settings": [
+    { "type": "product", "id": "product", "label": "Product", "autofill": true },
+    { "type": "header", "content": "Text" },
+    { "type": "text", "id": "heading", "label": "Heading", "default": "店舗で取置き（来店時に決済）" },
+    { "type": "text", "id": "subheading", "label": "Subheading", "default": "在庫のある店舗を選んで取置きを申し込めます。決済は店頭で行います。" },
+    { "type": "text", "id": "label_location", "label": "Location field label", "default": "受取店舗" },
+    { "type": "text", "id": "label_quantity", "label": "Quantity field label", "default": "数量" },
+    { "type": "text", "id": "button_label", "label": "Button label", "default": "この店舗で取置きする" },
+    { "type": "text", "id": "login_prompt", "label": "Login prompt (logged-out)", "default": "取置きのお申し込みにはログインが必要です。" },
+    { "type": "text", "id": "login_link_label", "label": "Login link label", "default": "ログインして取置きする" },
+    { "type": "text", "id": "label_pickup_at", "label": "Pickup-at label", "default": "受取店舗" },
+    { "type": "text", "id": "label_receipt", "label": "Receipt-number label", "default": "受取番号" },
+    { "type": "header", "content": "Messages" },
+    { "type": "text", "id": "loading_text", "label": "Loading text", "default": "在庫を確認中…" },
+    { "type": "text", "id": "msg_success", "label": "Success message", "default": "取置きを受け付けました。" },
+    { "type": "text", "id": "msg_sold_out", "label": "No stock message", "default": "取置き可能な店舗がありません。" },
+    { "type": "text", "id": "msg_stock_changed", "label": "Stock changed message", "default": "在庫が変動しました。数量・店舗をご確認ください。" },
+    { "type": "text", "id": "msg_submitting", "label": "Submitting text", "default": "送信中…" },
+    { "type": "text", "id": "msg_error", "label": "Generic error message", "default": "エラーが発生しました。時間をおいて再度お試しください。" },
+    { "type": "text", "id": "hold_hint", "label": "Hold-time hint ({hours})", "default": "取置き期限: お申込から {hours} 時間" },
+    { "type": "header", "content": "Advanced" },
+    { "type": "text", "id": "proxy_base", "label": "App Proxy base path", "default": "/apps/pickup", "info": "shopify.app.toml の app_proxy (prefix/subpath) と一致させる" },
+    { "type": "color", "id": "accent_color", "label": "Accent color", "default": "#1e6b35" }
+  ]
+}
+{% endschema %}

@@ -1,0 +1,36 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "3b94a1f32adefa1b646a0967520c189d"
+name = "pos-in-store-reservation"
+application_url = "https://nobu-pickup-fqclg2.tunnel.shopifycloud.tech"
+embedded = true
+
+[build]
+automatically_update_urls_on_dev = true
+
+[webhooks]
+api_version = "2026-04"
+
+  [[webhooks.subscriptions]]
+  topics = [ "app/uninstalled" ]
+  uri = "/webhooks/app/uninstalled"
+
+  [[webhooks.subscriptions]]
+  topics = [ "app/scopes_update" ]
+  uri = "/webhooks/app/scopes_update"
+
+  [[webhooks.subscriptions]]
+  topics = [ "orders/create" ]
+  uri = "/webhooks/orders/create"
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "read_products,read_inventory,write_inventory,read_locations,read_draft_orders,write_draft_orders,read_orders,write_orders,read_customers,write_customers"
+
+[auth]
+redirect_urls = [ "https://nobu-pickup-fqclg2.tunnel.shopifycloud.tech/auth/callback" ]
+
+[app_proxy]
+url = "https://nobu-pickup-fqclg2.tunnel.shopifycloud.tech"
+subpath = "pickup"
+prefix = "apps"

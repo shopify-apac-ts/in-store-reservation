@@ -1,0 +1,19 @@
+api_version = "2026-04"
+
+[[extensions]]
+type = "ui_extension"
+# Change the merchant-facing name of the extension in locales/en.default.json
+name = "t:name"
+uid = "c4362351-0f88-c0d9-4f8b-000df1190308282e6ea8"
+handle = "pickup-home"
+description = "A preact POS UI extension"
+
+# module: file that contains your extension’s source code
+# target: location where your extension appears in POS
+[[extensions.targeting]]
+module = "./src/Tile.jsx"
+target = "pos.home.tile.render"
+
+[[extensions.targeting]]
+module = "./src/Modal.jsx"
+target = "pos.home.modal.render"
